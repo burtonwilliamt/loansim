@@ -1,2 +1,2 @@
 # loansim
-Simulate loan repaiment strategies
+Simulate loan repayment strategies
