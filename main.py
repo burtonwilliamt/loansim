@@ -18,23 +18,30 @@ parser.add_argument(
     'Interest rate of savings account. Used to compare keeping the money in a savings account, but could be used for estimated market return, or other investments.'
 )
 
-parser.add_argument('--employeer_amount',
+parser.add_argument('--employer_amount',
                     type=float,
-                    help='Amount employeer would contribute each year.',
+                    help='Amount employer would contribute each year.',
                     default=None)
 
 parser.add_argument(
-    '--employeer_month',
+    '--employer_month',
     type=int,
     help=
-    'Month of the year to expect employeer contribution. Jan is 0, Dec is 11.',
+    'Month of the year to expect employer contribution. Jan is 0, Dec is 11.',
     default=None)
+
+parser.add_argument(
+    '--auto_pay_interest_discount',
+    type=float,
+    help=
+    'An interest rate dicount provided for setting up auto-pay. For example, 0.0025',
+    default=0.0)
 
 parser.add_argument('-v',
                     '--verbose',
-                    type=bool,
-                    help='Whether to print verbose simulation details.',
-                    default=None)
+                    type=int,
+                    help='Verbosity level, one of (0,1,2,3).',
+                    default=0)
 
 EXPECTED_COLUMNS = ('name', 'principal', 'current_interest', 'interest_rate')
 
@@ -52,7 +59,7 @@ class Loan:
 
     @property
     def daily_rate(self) -> float:
-        return self.interest_rate / 365.25
+        return self.interest_rate / 365
 
     @property
     def monthly_rate(self) -> float:
@@ -61,10 +68,14 @@ class Loan:
         return (((1 + self.daily_rate)**365)**(1 / 12) - 1)
 
     def accrue_one_month_interest(self):
-        interest = math.ceil(self.balance * self.monthly_rate)
+        # Simple interest, only calculated on principle.
+        # Interest is capitalized if I miss a payment I think?
+        interest = math.ceil(self.principle_pennies * self.monthly_rate)
         self.current_interest_pennies += interest
 
     def minimum_payment_pennies(self, months_remaining: int) -> int:
+        if months_remaining == 0:
+            return self.balance
         numerator = self.monthly_rate * (
             (1 + self.monthly_rate)**months_remaining)
         denominator = ((1 + self.monthly_rate)**months_remaining) - 1
@@ -122,7 +133,8 @@ class LoanPortfolio:
             return
 
 
-def load_loans(filename: str) -> list[Loan]:
+def load_loans(filename: str,
+               interest_rate_discount: float = 0.0) -> list[Loan]:
     res = []
     with open(filename, mode='rt', encoding='utf-8') as csvfile:
         reader = csv.reader(csvfile)
@@ -134,7 +146,8 @@ def load_loans(filename: str) -> list[Loan]:
             loan = Loan(name=row[0],
                         principle_pennies=math.ceil(float(row[1]) * 100),
                         current_interest_pennies=math.ceil(float(row[2]) * 100),
-                        interest_rate=float(row[3]))
+                        interest_rate=max(
+                            float(row[3]) - interest_rate_discount, 0.0))
             assert loan.principle_pennies >= 0, f'[row {i}] {loan.name} principal should be positive.'
             assert loan.current_interest_pennies >= 0, f'[row {i}] {loan.name} current_interest should be positive.'
             assert 1.0 > loan.interest_rate >= 0, f'[row {i}] {loan.name} interest_rate should be between 0.0 and 1.0.'
@@ -160,25 +173,29 @@ class Simulation:
     def __init__(self):
         args = parser.parse_args()
         self.verbose = args.verbose
-        self.portfolio = LoanPortfolio(load_loans(args.filename))
+        self.portfolio = LoanPortfolio(
+            load_loans(args.filename, args.auto_pay_interest_discount))
         self.payments_history = PaymentHistory(args.savings_rate)
 
-        assert ((args.employeer_amount is None and args.employeer_month is None)
-                or (args.employeer_amount is not None and
-                    args.employeer_month is not None))
-        self.employeer_amount = args.employeer_amount*100
-        self.employeer_month = args.employeer_month
+        assert ((args.employer_amount is None and args.employer_month is None)
+                or (args.employer_amount is not None and
+                    args.employer_month is not None))
+        self.employer_amount = args.employer_amount * 100
+        self.employer_month = args.employer_month
 
     def print_monthly_stats(self, months_remaining: int):
-        print(
-            f'[{months_remaining}] Loans: {self.portfolio.balance_pennies()/100} Total Paid: {self.payments_history.real_pennies/100}'
-        )
-        if not self.verbose:
-            return
-        for l in self.portfolio.loans:
-            print(f'\t{l.name} {l.interest_rate} {l.balance/100}')
+        if self.verbose >= 2:
+            print(
+                f'[{months_remaining}] '
+                f'Minimum payment: {self.portfolio.minimum_payment(months_remaining)/100} '
+                f'Loans: {self.portfolio.balance_pennies()/100} '
+                f'Total Paid: {self.payments_history.real_pennies/100}'
+            )
+        if self.verbose >= 3:
+            for l in self.portfolio.loans:
+                print(f'\t{l.name} {l.interest_rate} {l.balance/100}')
 
-    def make_early_payment(self, amount_pennies:int):
+    def make_early_payment(self, amount_pennies: int):
         self.portfolio.make_additional_payment(amount_pennies)
         self.payments_history.make_payment(amount_pennies, 0)
 
@@ -188,24 +205,23 @@ class Simulation:
         current_month = 9
 
         while months_remaining > 0:
-            #self.print_monthly_stats(months_remaining)
+            self.print_monthly_stats(months_remaining)
+
+            # Simulate a minimum payment in the portfolio.
             minimum_payment = self.portfolio.simulate_one_month_minimum_payments(
                 months_remaining)
+            # Keep track of making that payment.
+            self.payments_history.make_payment(minimum_payment,
+                                               (120 - months_remaining) + 1)
 
-            bill = minimum_payment
-
-            if current_month == self.employeer_month:
-                bill -= self.employeer_amount
-
-            if bill > 0:
-                self.payments_history.make_payment(bill, (120-months_remaining)+1)
-            elif bill < 0:
-                self.portfolio.make_additional_payment(-bill)
+            if current_month == self.employer_month:
+                self.portfolio.make_additional_payment(self.employer_amount)
+                if self.verbose >= 2:
+                    print(f'Employer contributed {self.employer_amount/100}!')
 
             months_remaining -= 1
             current_month = (current_month + 1) % 12
-        #self.print_monthly_stats(months_remaining)
-
+        self.print_monthly_stats(months_remaining)
 
 
 def main():
@@ -213,17 +229,23 @@ def main():
     best_total = None
     best_early_payment = None
     baseline_sim = Simulation()
-    for early_payment in range(int(baseline_sim.portfolio.balance_pennies()/(1000*100))):
-        early_payment = 1000*early_payment
+    print(f'Starting balance: {baseline_sim.portfolio.balance_pennies() / 100}')
+    for early_payment in range(
+            int(baseline_sim.portfolio.balance_pennies() / (1000 * 100))):
+        early_payment = 1000 * early_payment
         sim = Simulation()
-        sim.make_early_payment(early_payment*100)
+        sim.make_early_payment(early_payment * 100)
         sim.simulate_all()
-        print(f'{early_payment}: {sim.payments_history}')
+        if baseline_sim.verbose >= 1:
+            print(f'{early_payment}: {sim.payments_history}')
         if best_total is None or sim.payments_history.adjusted_pennies < best_total:
             best_total = sim.payments_history.adjusted_pennies
             best_early_payment = early_payment
-    print(f'Best early payment: {best_early_payment} results in {best_total/100}')
-
+    print(
+        f'Best early payment: {best_early_payment} results in {(best_total/100):.2f} adjusted dollars.'
+    )
+    optimal_sim = Simulation()
+    optimal_sim.make_early_payment(best_early_payment)
 
 
 if __name__ == '__main__':
